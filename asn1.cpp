@@ -304,8 +304,8 @@ HRESULT PFXImport(_In_ PUCHAR pbPFX,
 	{
 		if (pb)
 		{
-			ULONG cbKeyData = prkb->BitLength;
-			PVOID pvKeyData = prkb + 1;
+			ULONG cbKeyData;
+			PVOID pvKeyData;
 
 			BOOLEAN (*IsCertMatch)(_In_ PCCERT_CONTEXT pCertContext, _In_ PVOID pvKeyData, _In_ ULONG cbKeyData);
 
