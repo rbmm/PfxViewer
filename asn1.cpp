@@ -7,7 +7,7 @@ _NT_BEGIN
 
 struct SC
 {
-	BCRYPT_RSAKEY_BLOB* prkb = 0;
+	NCRYPT_KEY_HANDLE _hKey = 0;
 	PCWSTR pcszPassword;
 	SECURITY_STATUS opStatus = STATUS_NOT_FOUND;
 	ULONG cbData;
@@ -18,7 +18,10 @@ struct SC
 
 	~SC()
 	{
-		delete [] prkb;
+		if (NCRYPT_HANDLE hObject = _hKey)
+		{
+			NCryptFreeObject(hObject);
+		}
 	}
 
 	BOOLEAN ImportKey(PUCHAR pb, ULONG cb);
@@ -28,7 +31,7 @@ struct SC
 
 BOOLEAN SC::ImportKey(PUCHAR pb, ULONG cb)
 {
-	if (prkb)
+	if (_hKey)
 	{
 		opStatus = RPC_NT_ENTRY_ALREADY_EXISTS;
 		return FALSE;
@@ -56,29 +59,17 @@ BOOLEAN SC::ImportKey(PUCHAR pb, ULONG cb)
 
 		if (!status)
 		{
-			static const ULONG flags = NCRYPT_ALLOW_EXPORT_FLAG|NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
+			static const ULONG Flags = NCRYPT_ALLOW_EXPORT_FLAG|NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
 
-			if (!(status = NCryptSetProperty(hKey, NCRYPT_EXPORT_POLICY_PROPERTY, (PBYTE)&flags, sizeof(flags), 0)) &&
-				!(status = NCryptFinalizeKey(hKey, NCRYPT_SILENT_FLAG)))
+			if ((status = NCryptSetProperty(hKey, NCRYPT_EXPORT_POLICY_PROPERTY, (PBYTE)&Flags, sizeof(Flags), 0)) ||
+				(status = NCryptFinalizeKey(hKey, NCRYPT_SILENT_FLAG)))
 			{
-				pb = 0, cb = 0;
-
-				while(!(status = NCryptExportKey(hKey, 0, BCRYPT_RSAPRIVATE_BLOB, 0, pb, cb, &cb, 0)))
-				{
-					if (pb)
-					{
-						prkb = (BCRYPT_RSAKEY_BLOB*)pb, cbData = cb;
-						break;
-					}
-
-					if (!(pb = new UCHAR[cb]))
-					{
-						break;
-					}
-				}
+				NCryptFreeObject(hKey);
 			}
-
-			NCryptFreeObject(hKey);
+			else
+			{
+				_hKey  = hKey;
+			}
 		}
 	}
 
@@ -240,6 +231,46 @@ LPCBYTE SC::GetPriv8Key(LPCBYTE pbBuffer, ULONG cbLength)
 	return pbBuffer;
 }
 
+BOOLEAN IsCertMatchEcc(_In_ PCCERT_CONTEXT pCertContext, _In_ PVOID pvKeyData, _In_ ULONG cbKeyData)
+{
+	if (pCertContext)
+	{
+		PCRYPT_BIT_BLOB PublicKey = &pCertContext->pCertInfo->SubjectPublicKeyInfo.PublicKey;
+
+		return PublicKey->cbData == cbKeyData + 1 && !memcmp(1 + PublicKey->pbData, pvKeyData, cbKeyData);
+	}
+
+	return TRUE;
+}
+
+BOOLEAN IsCertMatchRsa(_In_ PCCERT_CONTEXT pCertContext, _In_ PVOID pvKeyData, _In_ ULONG BitLength)
+{
+	if (!pCertContext)
+	{
+		return TRUE;
+	}
+
+	PCRYPT_BIT_BLOB PublicKey = &pCertContext->pCertInfo->SubjectPublicKeyInfo.PublicKey;
+
+	ULONG cb;
+	BCRYPT_RSAKEY_BLOB* prkb;
+
+	if (CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, CNG_RSA_PUBLIC_KEY_BLOB, 
+		PublicKey->pbData, PublicKey->cbData, CRYPT_DECODE_ALLOC_FLAG|CRYPT_DECODE_NOCOPY_FLAG, 
+		0, &prkb, &cb))
+	{
+		BOOLEAN b = cb > sizeof(BCRYPT_RSAKEY_BLOB) &&
+			prkb->BitLength == BitLength &&
+			!memcmp(prkb + 1, pvKeyData, cb - sizeof(BCRYPT_RSAKEY_BLOB));
+
+		LocalFree(prkb);
+
+		return b;
+	}
+
+	return FALSE;
+}
+
 HRESULT PFXImport(_In_ PUCHAR pbPFX, 
 				  _In_ ULONG cbPFX, 
 				  _In_ PCWSTR szPassword, 
@@ -256,50 +287,77 @@ HRESULT PFXImport(_In_ PUCHAR pbPFX,
 		return HRESULT_FROM_WIN32(sc.opStatus);
 	}
 
-	DATA_BLOB pfx = { cbPFX, pbPFX };
+	union {
+		BCRYPT_RSAKEY_BLOB* prkb;
+		PBCRYPT_ECCKEY_BLOB pecc;
+		BCRYPT_KEY_BLOB* pkb;
+		PVOID pv;
+		PBYTE pb = 0;
+	};
 
-	if (HCERTSTORE hStore = PFXImportCertStore(&pfx, szPassword,
-		g_nt_ver.Version < _WIN32_WINNT_WIN10 ? PKCS12_NO_PERSIST_KEY : PKCS12_ONLY_CERTIFICATES|PKCS12_NO_PERSIST_KEY))
+	ULONG cb = 0;
+
+	HRESULT hr;
+	NCRYPT_KEY_HANDLE hKey = sc._hKey;
+
+	while(NOERROR == (hr = NCryptExportKey(hKey, 0, BCRYPT_PUBLIC_KEY_BLOB, 0, pb, cb, &cb, 0)))
 	{
-		PCCERT_CONTEXT pCertContext = 0;
-
-		while (pCertContext = CertEnumCertificatesInStore(hStore, pCertContext))
+		if (pb)
 		{
-			BOOL b = FALSE;
-			ULONG cb;
-			BCRYPT_RSAKEY_BLOB* prkb;
+			ULONG cbKeyData = prkb->BitLength;
+			PVOID pvKeyData = prkb + 1;
 
-			PCRYPT_BIT_BLOB PublicKey = &pCertContext->pCertInfo->SubjectPublicKeyInfo.PublicKey;
-			if (CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, CNG_RSA_PUBLIC_KEY_BLOB, 
-				PublicKey->pbData, PublicKey->cbData, CRYPT_DECODE_ALLOC_FLAG|CRYPT_DECODE_NOCOPY_FLAG, 
-				0, &prkb, &cb))
+			BOOLEAN (*IsCertMatch)(_In_ PCCERT_CONTEXT pCertContext, _In_ PVOID pvKeyData, _In_ ULONG cbKeyData);
+
+			switch (pkb->Magic)
 			{
-				b = cb > sizeof(BCRYPT_RSAKEY_BLOB) &&
-					prkb->BitLength == sc.prkb->BitLength &&
-					!memcmp(prkb + 1, sc.prkb + 1, cb - sizeof(BCRYPT_RSAKEY_BLOB));
-
-				LocalFree(prkb);
-			}
-
-			if (b)
-			{
+			case BCRYPT_RSAPUBLIC_MAGIC:
+				IsCertMatch = IsCertMatchRsa;
+				cbKeyData = prkb->BitLength;
+				pvKeyData = prkb + 1;
 				break;
+
+			case BCRYPT_ECDSA_PUBLIC_P256_MAGIC:
+			case BCRYPT_ECDSA_PUBLIC_P384_MAGIC:
+			case BCRYPT_ECDSA_PUBLIC_P521_MAGIC:
+				IsCertMatch = IsCertMatchEcc;
+				cbKeyData = pecc->cbKey << 1;
+				pvKeyData = pecc + 1;
+				break;
+
+			default:
+				return HRESULT_FROM_NT(STATUS_NOT_SUPPORTED);
 			}
+
+			DATA_BLOB pfx = { cbPFX, pbPFX };
+
+			if (HCERTSTORE hStore = PFXImportCertStore(&pfx, szPassword,
+				g_nt_ver.Version < _WIN32_WINNT_WIN10 ? PKCS12_NO_PERSIST_KEY : PKCS12_ONLY_CERTIFICATES|PKCS12_NO_PERSIST_KEY))
+			{
+				PCCERT_CONTEXT pCertContext = 0;
+
+				while (!IsCertMatch(pCertContext = CertEnumCertificatesInStore(hStore, pCertContext), pvKeyData, cbKeyData)) ;
+
+				CertCloseStore(hStore, 0);
+
+				if (pCertContext)
+				{
+					*ppCertContext = pCertContext;
+
+					return S_OK;
+				}
+
+				return HRESULT_FROM_NT(STATUS_NOT_FOUND);
+
+			}
+
+			return HRESULT_FROM_WIN32(GetLastError());
 		}
 
-		CertCloseStore(hStore, 0);
-
-		if (pCertContext)
-		{
-			*ppCertContext = pCertContext;
-
-			return S_OK;
-		}
-
-		return HRESULT_FROM_NT(STATUS_NOT_FOUND);
+		pv = alloca(cb);
 	}
 
-	return HRESULT_FROM_WIN32(GetLastError());
+	return hr;
 }
 
 HRESULT GetLastErrorEx(ULONG dwError = GetLastError())
