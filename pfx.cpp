@@ -3,13 +3,14 @@
 
 _NT_BEGIN
 
-#include "../inc/initterm.h"
+#include "dlg.h"
 
 #define MD5_HASH_SIZE 16
 
 HRESULT PFXImport(_In_ PCWSTR lpFileName, 
 				  _In_ PCWSTR szPassword, 
-				  _Out_ PCCERT_CONTEXT* ppCertContext);
+				  _Out_ PCCERT_CONTEXT* ppCertContext,
+				  _Out_ HCERTSTORE* phStore);
 
 int ShowErrorBox(HWND hWnd, HRESULT dwError, PCWSTR lpCaption, UINT uType)
 {
@@ -42,28 +43,88 @@ __nt:
 	return r;
 }
 
-class PfxDlg : public ZDlg
+typedef
+BOOL (WINAPI * PFNCCERTDISPLAYPROC)(
+									_In_  PCCERT_CONTEXT pCertContext,
+									_In_  HWND hWndSelCertDlg,
+									_In_  void* pvCallbackData
+									);
+
+typedef struct CRYPTUI_SELECTCERTIFICATE_STRUCTW {  
+	DWORD dwSize;  
+	HWND hwndParent;  
+	DWORD dwFlags;  
+	PCWSTR szTitle;  
+	DWORD dwDontUseColumn;  
+	PCWSTR szDisplayString;  
+	PFNCFILTERPROC pFilterCallback;  
+	PFNCCERTDISPLAYPROC pDisplayCallback;  
+	void* pvCallbackData;  
+	DWORD cDisplayStores;  
+	HCERTSTORE* rghDisplayStores;  
+	DWORD cStores;  
+	HCERTSTORE* rghStores;  
+	DWORD cPropSheetPages;  
+	LPCPROPSHEETPAGE rgPropSheetPages;  
+	HCERTSTORE hSelectedCertStore;
+} *PCRYPTUI_SELECTCERTIFICATE_STRUCTW;
+
+EXTERN_C
+WINBASEAPI
+PCCERT_CONTEXT WINAPI CryptUIDlgSelectCertificateW(
+	__in  const CRYPTUI_SELECTCERTIFICATE_STRUCTW* pcsc
+	);
+
+HRESULT DisplayStore(HWND hwndDlg, HCERTSTORE hStore)
+{
+	CRYPTUI_SELECTCERTIFICATE_STRUCTW csc = { sizeof(csc), hwndDlg };
+	csc.cDisplayStores = 1;
+	csc.cStores = 1;
+	csc.rghStores = &hStore;
+	csc.rghDisplayStores = &hStore;
+	if (PCCERT_CONTEXT pCertContext = CryptUIDlgSelectCertificateW(&csc))
+	{
+		CertFreeCertificateContext(pCertContext);
+		return S_OK;
+	}
+
+	return GetLastError();
+}
+
+HRESULT DisplayCert(HWND hwndDlg, HCERTSTORE hStore, PCCERT_CONTEXT pCertContext)
+{
+	BOOL b;
+	CRYPTUI_VIEWCERTIFICATE_STRUCTW cvi = { 
+		sizeof(cvi), hwndDlg, 
+		CRYPTUI_DISABLE_ADDTOSTORE|CRYPTUI_DISABLE_EDITPROPERTIES,
+		L"Certificate", pCertContext
+	};
+
+	cvi.cStores = 1;
+	cvi.rghStores = &hStore;
+
+	return BOOL_TO_ERROR(CryptUIDlgViewCertificateW(&cvi, &b));
+}
+
+class PfxDlg : public CDlgBase
 {
 	HICON _hi;
 	WCHAR _psc;
 	bool _bOK = false;
+	bool _bAll = false;
 
 	HRESULT OnOk(_In_ HWND hwndDlg, _In_ PCWSTR lpFileName, _In_ PCWSTR szPassword)
 	{
-		PCCERT_CONTEXT pCertContext = 0;
-		HRESULT hr = PFXImport(lpFileName, szPassword, &pCertContext);
+		HCERTSTORE hStore;
+		PCCERT_CONTEXT pCertContext;
+		HRESULT hr = PFXImport(lpFileName, szPassword, &pCertContext, &hStore);
 
 		if (0 <= hr)
 		{
-			BOOL b;
-			CRYPTUI_VIEWCERTIFICATE_STRUCT cvi = { sizeof(cvi), hwndDlg, 
-				CRYPTUI_DISABLE_ADDTOSTORE|CRYPTUI_DISABLE_EDITPROPERTIES,
-				L"Certificate", pCertContext
-			};
-
-			hr = GetLastHr(CryptUIDlgViewCertificateW(&cvi, &b));
+			hr = _bAll ? DisplayStore(hwndDlg, hStore) : DisplayCert(hwndDlg, hStore, pCertContext);
 
 			CertFreeCertificateContext(pCertContext);
+			CertCloseStore(hStore, 0);
 		}
 
 		return hr;
@@ -96,7 +157,15 @@ class PfxDlg : public ZDlg
 			ShowErrorBox(hwndDlg, STATUS_OBJECT_NAME_INVALID, L"Empty File Name", MB_ICONWARNING);
 			return ;
 		}
-		ShowErrorBox(hwndDlg, OnOk( hwndDlg, psz[0], psz[1] ? psz[1] : L""), L"Import PFX", MB_ICONINFORMATION);
+
+		switch (HRESULT hr = OnOk( hwndDlg, psz[0], psz[1] ? psz[1] : L""))
+		{
+		case S_OK:
+		case ERROR_CANCELLED:
+			return;
+		default:
+			ShowErrorBox(hwndDlg, hr, L"View PFX", MB_ICONINFORMATION);
+		}
 	}
 
 	static void OnBrowse(HWND hwndDlg)
@@ -149,10 +218,8 @@ class PfxDlg : public ZDlg
 		}
 
 		static const PCWSTR ss[] = {
-			L"Specify the file you want to import.",
+			L"Specify the file you want to view.",
 			L"Type the password for the private key.",
-			L"Enter PIN",
-			L"Confirm PIN"
 		};
 
 		ULONG n = _countof(E_id);
@@ -182,10 +249,14 @@ class PfxDlg : public ZDlg
 		} while ((id != id2) && (id = id2));
 	}
 
-	virtual INT_PTR DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
+	virtual INT_PTR DlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	{
 		switch (uMsg)
 		{
+		case WM_NCDESTROY:
+			OnNcDestroy();
+			break;
+
 		case WM_COMMAND:
 			switch (wParam)
 			{
@@ -205,6 +276,9 @@ class PfxDlg : public ZDlg
 				TooglePasswordChar(hwndDlg, (HWND)lParam, IDC_EDIT2);
 				break;
 
+			case MAKEWPARAM(IDC_CHECK2, BN_CLICKED):
+				_bAll = SendMessageW((HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED;
+				break;
 			}
 			return 0;
 
@@ -244,22 +318,20 @@ class PfxDlg : public ZDlg
 			return TRUE;
 		}
 
-		return __super::DialogProc(hwndDlg, uMsg, wParam, lParam);
+		return 0;
 	}
 };
 
 void WINAPI ep(void*)
 {
-	initterm();
 	if (0 <= CoInitializeEx(0, COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE))
 	{
 		PfxDlg dlg;
-		dlg.DoModal((HINSTANCE)&__ImageBase, MAKEINTRESOURCEW(IDD_DIALOG1), 0, 0);
+		dlg.DoModal(MAKEINTRESOURCEW(IDD_DIALOG1));
 
 		CoUninitialize();
 	}
 
-	destroyterm();
 	ExitProcess(0);
 }
 

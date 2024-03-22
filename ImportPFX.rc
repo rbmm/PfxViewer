@@ -11,30 +11,6 @@
 /////////////////////////////////////////////////////////////////////////////
 #undef APSTUDIO_READONLY_SYMBOLS
 
-#ifdef APSTUDIO_INVOKED
-/////////////////////////////////////////////////////////////////////////////
-//
-// TEXTINCLUDE
-//
-
-1 TEXTINCLUDE 
-BEGIN
-    "resource.h\0"
-END
-
-2 TEXTINCLUDE 
-BEGIN
-    "#include ""winres.h""\r\0"
-END
-
-3 TEXTINCLUDE 
-BEGIN
-    "#include "".rc2""\r\0"
-END
-
-#endif    // APSTUDIO_INVOKED
-
-/////////////////////////////////////////////////////////////////////////////
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -63,6 +39,7 @@ BEGIN
     EDITTEXT        IDC_EDIT2,40,54,246,14,ES_PASSWORD | ES_AUTOHSCROLL
     LTEXT           "Password:",IDC_STATIC,40,42,34,8
     CONTROL         "Display Password",IDC_CHECK1,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,40,73,71,10
+    CONTROL         "Show all certificates",IDC_CHECK2,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,117,73,79,10
 END
 
 
