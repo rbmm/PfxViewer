@@ -4,7 +4,15 @@
 #include <WINDOWSX.H>
 #include <shobjidl_core.h >
 #include <Cryptuiapi.h >
+
 _NT_BEGIN
-#include "../winZ/window.h"
+HRESULT GetLastErrorEx(ULONG dwError = GetLastError());
+
+template <typename T> 
+T HR(HRESULT& hr, T t)
+{
+	hr = t ? NOERROR : GetLastErrorEx();
+	return t;
+}
 
 _NT_END
