@@ -4,8 +4,6 @@ PSTR __fastcall strnstr(SIZE_T n1, const void* str1, SIZE_T n2, const void* str2
 
 #define _strnstr(a, b, x) strnstr(RtlPointerToOffset(a, b), a, sizeof(x) - 1, x)
 
-_NT_BEGIN
-
 HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_opt_ PCWSTR pszPassword = 0)
 {
 	NCRYPT_PROV_HANDLE hProvider;
@@ -381,7 +379,10 @@ __0:
 						}
 
 						*keys = static_cast<PemKey*>(pem)->get();
-						nKeys++;
+						if (++nKeys == 128)
+						{
+							hr = STATUS_TOO_MANY_SECRETS;
+						}
 					}
 				}
 
@@ -450,4 +451,3 @@ HRESULT PEMImport(_In_ PCWSTR lpFileName,
 
 	return hr;
 }
-_NT_END

@@ -1,7 +1,5 @@
 #include "stdafx.h"
 
-_NT_BEGIN
-
 #include "dlg.h"
 
 INT_PTR CDlgBase::WrapDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -38,5 +36,3 @@ INT_PTR CALLBACK CDlgBase::StaticDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
 	return reinterpret_cast<CDlgBase*>(This)->WrapDlgProc(hwnd, uMsg, wParam, lParam);
 }
-
-_NT_END

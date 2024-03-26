@@ -1,7 +1,5 @@
 #include "stdafx.h"
 
-_NT_BEGIN
-
 HRESULT GetLastErrorEx(ULONG dwError/* = GetLastError()*/)
 {
 	NTSTATUS status = RtlGetLastNtStatus();
@@ -78,4 +76,32 @@ HRESULT ReadFromFile(_In_ PCWSTR lpFileName, _Out_ PBYTE* ppb, _Out_ ULONG* pcb)
 	return status ? HRESULT_FROM_NT(status) : S_OK;
 }
 
-_NT_END
+HRESULT SaveToFile(_In_ PCWSTR lpFileName, _In_ const void* lpBuffer, _In_ ULONG nNumberOfBytesToWrite)
+{
+	UNICODE_STRING ObjectName;
+
+	NTSTATUS status = RtlDosPathNameToNtPathName_U_WithStatus(lpFileName, &ObjectName, 0, 0);
+
+	if (0 <= status)
+	{
+		HANDLE hFile;
+		IO_STATUS_BLOCK iosb;
+		OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
+
+		LARGE_INTEGER AllocationSize = { nNumberOfBytesToWrite };
+
+		status = NtCreateFile(&hFile, FILE_APPEND_DATA|SYNCHRONIZE, &oa, &iosb, &AllocationSize,
+			0, 0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE, 0, 0);
+
+		RtlFreeUnicodeString(&ObjectName);
+
+		if (0 <= status)
+		{
+			status = NtWriteFile(hFile, 0, 0, 0, &iosb, const_cast<void*>(lpBuffer), nNumberOfBytesToWrite, 0, 0);
+			NtClose(hFile);
+		}
+	}
+
+	return status ? HRESULT_FROM_NT(status) : S_OK;
+}
+

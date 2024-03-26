@@ -1,11 +1,12 @@
 #include "stdafx.h"
 #include "resource.h"
 
-_NT_BEGIN
-
 #include "dlg.h"
 
-#define MD5_HASH_SIZE 16
+inline ULONG BOOL_TO_ERROR(BOOL f)
+{
+	return f ? NOERROR : GetLastError();
+}
 
 HRESULT PFXImport(_In_ PCWSTR lpFileName, 
 				  _In_ PCWSTR szPassword, 
@@ -115,7 +116,6 @@ class PfxDlg : public CDlgBase
 {
 	HICON _hi;
 	WCHAR _psc;
-	bool _bOK = false;
 	bool _bAll = false;
 	bool _bPem = false;
 
@@ -178,7 +178,7 @@ class PfxDlg : public CDlgBase
 	{
 		IFileOpenDialog *pFileOpen;
 
-		HRESULT hr = CoCreateInstance(__uuidof(FileOpenDialog), NULL, CLSCTX_ALL, IID_PPV(pFileOpen));
+		HRESULT hr = CoCreateInstance(__uuidof(FileOpenDialog), NULL, CLSCTX_ALL, IID_PPV_ARGS(&pFileOpen));
 
 		if (SUCCEEDED(hr))
 		{
@@ -351,5 +351,3 @@ void WINAPI ep(void*)
 
 	ExitProcess(0);
 }
-
-_NT_END

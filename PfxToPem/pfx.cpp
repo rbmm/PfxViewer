@@ -1,7 +1,5 @@
 #include "stdafx.h"
 
-_NT_BEGIN
-
 HRESULT ReadFromFile(_In_ PCWSTR lpFileName, _Out_ PBYTE* ppb, _Out_ ULONG* pcb);
 
 HRESULT PFXImport(_In_ CRYPT_DATA_BLOB* pPFX, 
@@ -48,5 +46,3 @@ HRESULT PFXImport(_In_ PCWSTR pszFileName,
 
 	return hr;
 }
-
-_NT_END
