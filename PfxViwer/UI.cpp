@@ -122,12 +122,12 @@ class PfxDlg : public CDlgBase
 	HRESULT OnOk(_In_ HWND hwndDlg, _In_ PCWSTR lpFileName, _In_ PCWSTR szPassword)
 	{
 		HCERTSTORE hStore;
-		PCCERT_CONTEXT pCertContext;
+		PCCERT_CONTEXT pCertContext = 0;
 		HRESULT hr = (_bPem ? PEMImport : PFXImport)(lpFileName, szPassword, &pCertContext, &hStore);
 
 		if (0 <= hr)
 		{
-			hr = _bAll ? DisplayStore(hwndDlg, hStore) : DisplayCert(hwndDlg, hStore, pCertContext);
+			hr = _bAll || !pCertContext ? DisplayStore(hwndDlg, hStore) : DisplayCert(hwndDlg, hStore, pCertContext);
 
 			CertFreeCertificateContext(pCertContext);
 			CertCloseStore(hStore, 0);

@@ -418,6 +418,10 @@ __0:
 
 			} while (--nKeys);
 		}
+		else
+		{
+			hr = NTE_NOT_FOUND;
+		}
 
 		if (S_OK == hr)
 		{
@@ -439,6 +443,7 @@ HRESULT PEMImport(_In_ PCWSTR lpFileName,
 				  _Out_ HCERTSTORE* phStore,
 				  _Out_ ULONG* pcb)
 {
+	*phStore = 0;
 	PSTR pb;
 	ULONG cb;
 	HRESULT hr = ReadFromFile(lpFileName, (PBYTE*)&pb, &cb);

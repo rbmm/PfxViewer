@@ -442,6 +442,8 @@ HRESULT PEMImport(_In_ PCWSTR lpFileName,
 {
 	PSTR pb;
 	ULONG cb;
+	*ppCertContext = 0;
+	*phStore = 0;
 	HRESULT hr = ReadFromFile(lpFileName, (PBYTE*)&pb, &cb);
 	if (S_OK == hr)
 	{

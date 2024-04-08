@@ -36,6 +36,8 @@ HRESULT PFXImport(_In_ PCWSTR pszFileName,
 				  _Out_ PCCERT_CONTEXT* ppCertContext,
 				  _Out_ HCERTSTORE* phStore)
 {
+	*ppCertContext = 0;
+	*phStore = 0;
 	CRYPT_DATA_BLOB PFX;
 	HRESULT hr = ReadFromFile(pszFileName, &PFX.pbData, &PFX.cbData);
 	if (S_OK == hr)
