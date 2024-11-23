@@ -1,4 +1,14 @@
 #include "stdafx.h"
+
+_NT_BEGIN
+
+template <typename T> 
+T HR(HRESULT& hr, T t)
+{
+	hr = t ? NOERROR : GetLastError();
+	return t;
+}
+
 #include "Pkcs.h"
 
 NTSTATUS ImportRsaKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_ PCWSTR pszBlobType, _In_reads_(cb) BYTE* pb, _In_ ULONG cb)
@@ -110,7 +120,10 @@ UCHAR IsEncryptKey(PCRYPT_ATTRIBUTES pAttributes)
 	return 0;
 }
 
-HRESULT PkcsImportPlainTextKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb)
+HRESULT PkcsImportPlainTextKey(_Out_ BCRYPT_KEY_HANDLE* phKey, 
+							   _In_reads_(cb) BYTE* pb, 
+							   _In_ ULONG cb, 
+							   _Out_opt_ PULONG pcrc)
 {
 	PCRYPT_PRIVATE_KEY_INFO PrivateKeyInfo;
 
@@ -153,6 +166,7 @@ HRESULT PkcsImportPlainTextKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BY
 				switch ((ULONG_PTR)lpszStructType)
 				{
 				case (ULONG_PTR)CNG_RSA_PRIVATE_KEY_BLOB:
+					HashKey((BCRYPT_RSAKEY_BLOB*) pb, cb, pcrc);
 					hr = ImportRsaKey(phKey, BCRYPT_RSAPRIVATE_BLOB, pb, cb);
 					break;
 
@@ -199,13 +213,6 @@ struct CryptCNGMap
 	struct ENCODE_DECODE_PARA {
 		PFN_CRYPT_ALLOC         pfnAlloc;           // OPTIONAL
 		PFN_CRYPT_FREE          pfnFree;            // OPTIONAL
-	};
-
-	struct SECRET_APPEND
-	{
-		ULONG IterationCount;
-		ULONG cb;
-		UCHAR buf[];
 	};
 
 	ULONG version;
@@ -256,7 +263,7 @@ struct CryptCNGMap
 		_In_ UCHAR SECRET_PREPEND,
 		_In_ PCWSTR pszPassword,
 		_In_ ULONG cbPassword, // wcslen(pszPassword)*sizeof(WCHAR)
-		_In_opt_ SECRET_APPEND* p,
+		_In_opt_ CRYPT_PKCS12_PBE_PARAMS* p,
 		_In_opt_ ULONG cb,
 		_Out_ PBYTE pbOutput,
 		_Out_ ULONG cbOutput
@@ -289,8 +296,64 @@ void WINAPI PkiFree(void* pv)
 	LocalFree(pv);
 }
 
+HRESULT GetLastErrorEx(ULONG dwError = GetLastError());
+
+EXTERN_C
+WINBASEAPI
+BOOL
+WINAPI
+I_PFXDecrypt(_In_ PCSTR pszObjId, 
+			 _In_ PBYTE pbParams, 
+			 _In_ ULONG cbParams, 
+			 _In_ PBYTE pbEncryptedKey, 
+			 _In_ ULONG cbEncryptedKey, 
+			 _Out_ BYTE* pbClearTextKey,
+			 _Out_ DWORD* pcbClearTextKey, 
+			 _In_ const void* pbSecret, 
+			 _In_ ULONG cbSecret);
+
+EXTERN_C PVOID __imp_I_PFXDecrypt = 0;
+
+struct CRYPT_PKCS12_PBES2_PARAMS
+{
+	/*00*/BOOL bUTF8;
+	/*04*/CHAR pszObjId[0x20];// szOID_PKCS_5_PBKDF2 "1.2.840.113549.1.5.12"
+	/*24*/ULONG cbSalt;
+	/*28*/UCHAR pbSalt[0x20];
+	/*48*/ULONG cIterations;
+	/*4c*/ULONG pad;
+	/*50*/CHAR pszHMACAlgorithm[0x20];//PKCS12_PBKDF2_ID_HMAC_SHAxxx -> BCRYPT_HMAC_SHAxxx_ALG_HANDLE ("1.2.840.113549.2.*")
+	/*70*/CHAR pszKeyAlgorithm[0x20]; //szOID_NIST_AESxxx_CBC "2.16.840.1.101.3.4.1.*2"
+	/*90*/ULONG cbIV;
+	/*94*/UCHAR pbIV[0x20];
+	/*b4*/
+};
+
 HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ PCWSTR pszPassword)
 {
+	if (!__imp_I_PFXDecrypt)
+	{
+		if (HMODULE hmod = LoadLibraryW(L"crypt32"))
+		{
+			if (PVOID pv = GetProcAddress(hmod, "I_PFXDecrypt"))
+			{
+				__imp_I_PFXDecrypt = pv;
+			}
+		}
+	}
+
+	if (__imp_I_PFXDecrypt)
+	{
+		return BOOL_TO_ERROR(I_PFXDecrypt(pepki->EncryptionAlgorithm.pszObjId, 
+			pepki->EncryptionAlgorithm.Parameters.pbData, 
+			pepki->EncryptionAlgorithm.Parameters.cbData, 
+			pepki->EncryptedPrivateKey.pbData, 
+			pepki->EncryptedPrivateKey.cbData, 
+			pepki->EncryptedPrivateKey.pbData,
+			&pepki->EncryptedPrivateKey.cbData, 
+			pszPassword, (1 + (ULONG)wcslen(pszPassword))* sizeof(WCHAR)));
+	}
+
 	HCRYPTOIDFUNCADDR hFuncAddr;
 
 	if (HCRYPTOIDFUNCSET hFuncSet = CryptInitOIDFunctionSet("CryptCNGPKCS12GetMap", 0))
@@ -309,61 +372,52 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 
 			NTSTATUS status;
 
+			ULONG cbParameters;
+
+			union {
+				PBYTE pbParameters;
+				CRYPT_PKCS12_PBE_PARAMS* params;
+				CRYPT_PKCS12_PBES2_PARAMS* paramsS2;
+			};
+
 			if (0 <= (status = map->ParamsDecode(
 				pepki->EncryptionAlgorithm.Parameters.pbData,
 				pepki->EncryptionAlgorithm.Parameters.cbData, 
-				&cdp, 
-				&pepki->EncryptionAlgorithm.Parameters.pbData,
-				&pepki->EncryptionAlgorithm.Parameters.cbData)))
+				&cdp, &pbParameters, &cbParameters)))
 			{
 				ULONG cb;
 				BCRYPT_ALG_HANDLE hAlgorithm;
 
 				if (0 <= (status = map->InitDecrypt(&hAlgorithm, &cb, 
-					pepki->EncryptionAlgorithm.Parameters.pbData,
-					pepki->EncryptionAlgorithm.Parameters.cbData)))
+					pbParameters,
+					cbParameters)))
 				{
 					BCRYPT_KEY_HANDLE hKey;
 
 					PBYTE pbSecret = (PBYTE)pszPassword;
 					ULONG cbSecret = (ULONG)wcslen(pszPassword);
 
-					struct CRYPT_PKCS12_PBES2_PARAMS 
-					{
-						/*00*/BOOL bUTF8;
-						/*04*/CHAR pszObjId[0x20];//szOID_PKCS_5_PBKDF2
-						/*24*/ULONG cbSalt;
-						/*28*/UCHAR pbSalt[0x20];
-						/*48*/ULONG cIterations;
-						/*4c*/ULONG pad;
-						/*50*/CHAR pszHMACAlgorithm[0x20];//PKCS12_PBKDF2_ID_HMAC_SHAxxx -> BCRYPT_HMAC_SHAxxx_ALG_HANDLE
-						/*70*/CHAR pszKeyAlgorithm[0x20];//szOID_NIST_AESxxx_CBC
-						/*90*/ULONG cbIV;
-						/*94*/UCHAR pbIV[0x20];
-						/*b4*/
-					};
-
 					PBYTE pbIV = 0;
 					ULONG cbIV = 0;
 					BOOL bUTF8 = FALSE;
 
-					CRYPT_PKCS12_PBES2_PARAMS* py = reinterpret_cast<CRYPT_PKCS12_PBES2_PARAMS*>(pepki->EncryptionAlgorithm.Parameters.pbData);
-
-					if (sizeof(CRYPT_PKCS12_PBES2_PARAMS) == pepki->EncryptionAlgorithm.Parameters.cbData &&
-						!strcmp(szOID_PKCS_5_PBKDF2, py->pszObjId))
+					if (!strcmp(szOID_PKCS_5_PBES2, pepki->EncryptionAlgorithm.pszObjId))
 					{
-						pbIV = py->pbIV;
-						cbIV = py->cbIV;
-						if (cbIV > sizeof(py->pbIV))
+						status = STATUS_BAD_DATA;
+
+						if (sizeof(CRYPT_PKCS12_PBES2_PARAMS) != cbParameters ||
+							sizeof(paramsS2->pbIV) < (cbIV = paramsS2->cbIV))
 						{
-							status = STATUS_BAD_DATA;
 							goto __0;
 						}
 
-						if (bUTF8 = py->bUTF8)
+						pbIV = paramsS2->pbIV;
+
+						if (bUTF8 = paramsS2->bUTF8)
 						{
 							PSTR psz = 0;
 							ULONG cch = 0;
+
 							while(cch = WideCharToMultiByte(CP_UTF8, 0, pszPassword, cbSecret, psz, cch, 0, 0))
 							{
 								if (psz)
@@ -384,10 +438,7 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 					}
 
 					status = map->InitDecryptKey(hAlgorithm, &hKey, 
-						(PBYTE)alloca(cb), cb, pbSecret, cbSecret,
-						pepki->EncryptionAlgorithm.Parameters.pbData,
-						pepki->EncryptionAlgorithm.Parameters.cbData 
-						);
+						(PBYTE)alloca(cb), cb, pbSecret, cbSecret, pbParameters, cbParameters);
 
 					BCryptCloseAlgorithmProvider(hAlgorithm, 0);
 
@@ -405,7 +456,7 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 					}
 				}
 __0:
-				LocalFree(pepki->EncryptionAlgorithm.Parameters.pbData);
+				LocalFree(pbParameters);
 			}
 
 			CryptFreeOIDFunctionAddress(hFuncAddr, 0);
@@ -417,7 +468,11 @@ __0:
 	return GetLastErrorEx();
 }
 
-HRESULT PkcsImportEncodedKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_ PCWSTR pszPassword)
+HRESULT PkcsImportEncodedKey(_Out_ BCRYPT_KEY_HANDLE* phKey, 
+							 _In_reads_(cb) BYTE* pb, 
+							 _In_ ULONG cb, 
+							 _In_ PCWSTR pszPassword,
+							 _Out_opt_ PULONG pcrc)
 {
 	HRESULT hr;
 	PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki;
@@ -430,7 +485,7 @@ HRESULT PkcsImportEncodedKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE
 		{
 			hr = PkcsImportPlainTextKey(phKey,
 				pepki->EncryptedPrivateKey.pbData,
-				pepki->EncryptedPrivateKey.cbData);
+				pepki->EncryptedPrivateKey.cbData, pcrc);
 		}
 
 		LocalFree(pepki);
@@ -439,7 +494,10 @@ HRESULT PkcsImportEncodedKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE
 	return hr;
 }
 
-HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_opt_ PCWSTR pszPassword /*= 0*/)
+HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, 
+					  _In_reads_(cb) BYTE* pb, 
+					  _In_ ULONG cb, 
+					  _In_opt_ PCWSTR pszPassword /*= 0*/)
 {
 	NCRYPT_PROV_HANDLE hProvider;
 	SECURITY_STATUS status = NCryptOpenStorageProvider(&hProvider, MS_KEY_STORAGE_PROVIDER, 0);
@@ -485,7 +543,9 @@ HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _
 	return status;
 }
 
-HRESULT NKeyToBKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_ NCRYPT_KEY_HANDLE hKey)
+HRESULT NKeyToBKey(_Out_ BCRYPT_KEY_HANDLE* phKey, 
+				   _In_ NCRYPT_KEY_HANDLE hKey, 
+				   _Out_opt_ PULONG pcrc)
 {
 	WCHAR szAlgId[0x40];
 	ULONG cb = sizeof(szAlgId);
@@ -501,6 +561,8 @@ HRESULT NKeyToBKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_ NCRYPT_KEY_HANDLE hKey)
 		{
 			if (pb)
 			{
+				HashKey((BCRYPT_RSAKEY_BLOB*)pb, cb, pcrc);
+
 				BCRYPT_ALG_HANDLE hAlgorithm;
 				if (0 <= (status = BCryptOpenAlgorithmProvider(&hAlgorithm, szAlgId, 0, 0)))
 				{
@@ -518,25 +580,21 @@ HRESULT NKeyToBKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_ NCRYPT_KEY_HANDLE hKey)
 	return status;
 }
 
-HRESULT PkcsImportKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_ PCWSTR pszPassword)
+HRESULT PkcsImportKey(_Out_ BCRYPT_KEY_HANDLE* phKey, 
+					  _In_reads_(cb) BYTE* pb, 
+					  _In_ ULONG cb,
+					  _In_ PCWSTR pszPassword,
+					  _Out_opt_ PULONG pcrc)
 {
 	HRESULT hr;
 	NCRYPT_KEY_HANDLE hKey;
 	if (S_OK == (hr = PkcsImportKey(&hKey, pb, cb, pszPassword)))
 	{
-		hr = NKeyToBKey(phKey, hKey);
+		hr = NKeyToBKey(phKey, hKey, pcrc);
 		NCryptFreeObject(hKey);
 	}
 
 	return hr;
 }
 
-HRESULT PkcsImportPlainTextKey2(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb)
-{
-	return PkcsImportPlainTextKey(phKey, pb, cb) ? PkcsImportKey(phKey, pb, cb) : S_OK;
-}
-
-HRESULT PkcsImportEncodedKey2(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_ PCWSTR pszPassword)
-{
-	return PkcsImportEncodedKey(phKey, pb, cb, pszPassword) ? PkcsImportKey(phKey, pb, cb, pszPassword) : S_OK;
-}
+_NT_END

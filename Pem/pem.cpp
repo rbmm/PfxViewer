@@ -161,7 +161,7 @@ struct PemPrivateKey : public PemKey
 {
 	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
 	{
-		return PkcsImportPlainTextKey2(&_M_hKey, pb, cb);
+		return PkcsImportPlainTextKey(&_M_hKey, pb, cb);
 	}
 };
 
@@ -175,7 +175,7 @@ struct PemEncryptedPrivateKey : public PemPrivateKey
 
 	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
 	{
-		return PkcsImportEncodedKey2(&_M_hKey, pb, cb, _M_pszPassword);
+		return PkcsImportEncodedKey(&_M_hKey, pb, cb, _M_pszPassword);
 	}
 };
 
