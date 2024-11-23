@@ -230,6 +230,45 @@ HRESULT GetPublicCrc(_In_ BCRYPT_KEY_HANDLE hKey, _Out_ ULONG* crc)
 	return hr;
 }
 
+BOOL HashKey(BCRYPT_RSAKEY_BLOB* pbrb, ULONG cb, PULONG pcrc)
+{
+	if (!pcrc) return TRUE;
+
+	if (cb <= sizeof(BCRYPT_RSAKEY_BLOB))
+	{
+		return FALSE;
+	}
+
+	switch (pbrb->Magic)
+	{
+	case BCRYPT_RSAPUBLIC_MAGIC:
+	case BCRYPT_RSAPRIVATE_MAGIC:
+	case BCRYPT_RSAFULLPRIVATE_MAGIC:
+		break;
+	default:
+		return FALSE;
+	}
+
+	cb -= sizeof(BCRYPT_RSAKEY_BLOB);
+
+	ULONG cbPublicExp = pbrb->cbPublicExp;
+
+	if (cb <= cbPublicExp)
+	{
+		return FALSE;
+	}
+
+	cb -= cbPublicExp;
+
+	if (cb < pbrb->cbModulus)
+	{
+		return FALSE;
+	}
+
+	*pcrc = RtlComputeCrc32(pbrb->BitLength, pbrb + 1, cbPublicExp + pbrb->cbModulus);
+	return TRUE;
+}
+
 PSTR __fastcall strnstr(SIZE_T n1, const void* str1, SIZE_T n2, const void* str2);
 
 #define _strnstr(a, b, x) strnstr(RtlPointerToOffset(a, b), a, sizeof(x) - 1, x)

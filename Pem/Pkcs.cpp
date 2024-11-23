@@ -1,15 +1,11 @@
 #include "stdafx.h"
 
-_NT_BEGIN
-
-template <typename T> 
-T HR(HRESULT& hr, T t)
-{
-	hr = t ? NOERROR : GetLastError();
-	return t;
-}
-
 #include "Pkcs.h"
+
+inline ULONG BOOL_TO_ERROR(BOOL f)
+{
+	return f ? NOERROR : GetLastError();
+}
 
 NTSTATUS ImportRsaKey(_Out_ BCRYPT_KEY_HANDLE* phKey, _In_ PCWSTR pszBlobType, _In_reads_(cb) BYTE* pb, _In_ ULONG cb)
 {
@@ -295,8 +291,6 @@ void WINAPI PkiFree(void* pv)
 {
 	LocalFree(pv);
 }
-
-HRESULT GetLastErrorEx(ULONG dwError = GetLastError());
 
 EXTERN_C
 WINBASEAPI
@@ -596,5 +590,3 @@ HRESULT PkcsImportKey(_Out_ BCRYPT_KEY_HANDLE* phKey,
 
 	return hr;
 }
-
-_NT_END
