@@ -420,7 +420,7 @@ __0:
 		}
 		else
 		{
-			hr = NTE_NOT_FOUND;
+			if (S_OK == hr) hr = NTE_NOT_FOUND;		
 		}
 
 		if (S_OK == hr)
