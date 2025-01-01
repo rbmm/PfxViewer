@@ -163,7 +163,16 @@ HRESULT PkcsImportPlainTextKey(_Out_ BCRYPT_KEY_HANDLE* phKey,
 				{
 				case (ULONG_PTR)CNG_RSA_PRIVATE_KEY_BLOB:
 					HashKey((BCRYPT_RSAKEY_BLOB*) pb, cb, pcrc);
-					hr = ImportRsaKey(phKey, BCRYPT_RSAPRIVATE_BLOB, pb, cb);
+					if (*(ULONG_PTR*)phKey == PLAIP::tag)
+					{
+						PLAIP* p = CONTAINING_RECORD(phKey, PLAIP, hFakeKey);
+						p->pb = pb, pb = 0;
+						p->cb = cb;
+					}
+					else
+					{
+						hr = ImportRsaKey(phKey, BCRYPT_RSAPRIVATE_BLOB, pb, cb);
+					}
 					break;
 
 				case (ULONG_PTR)X509_ECC_PRIVATE_KEY:
@@ -444,7 +453,7 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 							0, pbIV, cbIV, 
 							pepki->EncryptedPrivateKey.pbData,
 							pepki->EncryptedPrivateKey.cbData,
-							&pepki->EncryptedPrivateKey.cbData, 0);
+							&pepki->EncryptedPrivateKey.cbData, BCRYPT_BLOCK_PADDING);
 
 						BCryptDestroyKey(hKey);
 					}
@@ -456,6 +465,154 @@ __0:
 			CryptFreeOIDFunctionAddress(hFuncAddr, 0);
 
 			return status ? HRESULT_FROM_NT(status) : STATUS_SUCCESS;
+		}
+	}
+
+	return GetLastErrorEx();
+}
+
+HRESULT EncryptPrivateKey(_Out_ PBYTE *ppbEncoded,
+						  _Out_ DWORD *pcbEncoded,
+						  _In_ PBYTE pbKeyInfo,
+						  _In_ ULONG cbKeyInfo,
+						  _In_ PCWSTR pszPassword,
+						  _In_ PCSTR pszObjId,
+						  _In_ ULONG iIterations,
+						  _In_ ULONG cbSalt)
+{
+	HCRYPTOIDFUNCADDR hFuncAddr;
+
+	if (HCRYPTOIDFUNCSET hFuncSet = CryptInitOIDFunctionSet("CryptCNGPKCS12GetMap", 0))
+	{
+		union {
+			PVOID pvFuncAddr;
+			CryptCNGMap* (WINAPI *GetPKCS12Map)();
+		};
+
+		CRYPT_ENCRYPTED_PRIVATE_KEY_INFO epki = {};
+
+		BOOL S2 = !strcmp(szOID_PKCS_5_PBES2, pszObjId);
+
+		if (CryptGetOIDFunctionAddress(hFuncSet, X509_ASN_ENCODING, 
+			epki.EncryptionAlgorithm.pszObjId = const_cast<PSTR>(pszObjId), 
+			CRYPT_GET_INSTALLED_OID_FUNC_FLAG, &pvFuncAddr, &hFuncAddr))
+		{
+			CryptCNGMap* map = GetPKCS12Map();
+
+			static const CryptCNGMap::ENCODE_DECODE_PARA cdp = { PkiAlloc, PkiFree };
+
+			NTSTATUS status;
+
+			union {
+				PVOID pvParameters;
+				PBYTE pbParameters;
+				CRYPT_PKCS12_PBE_PARAMS* params;
+				CRYPT_PKCS12_PBES2_PARAMS* paramsS2;
+			};
+
+			BOOL bUTF8 = FALSE, bWin32 = FALSE;
+			PBYTE pbIV = 0;
+			ULONG cbIV = 0;
+
+			ULONG cbParameters = S2 ? sizeof(CRYPT_PKCS12_PBES2_PARAMS) : sizeof(CRYPT_PKCS12_PBE_PARAMS) + cbSalt;
+			pvParameters = alloca(cbParameters);
+
+			if (S2)
+			{
+				paramsS2->bUTF8 = bUTF8 = TRUE;
+				paramsS2->cbSalt = cbSalt;
+				paramsS2->cbIV = 0x10;
+				paramsS2->cIterations = iIterations;
+
+				pbIV = paramsS2->pbIV;
+				cbIV = paramsS2->cbIV;
+
+				strcpy(paramsS2->pszObjId, szOID_PKCS_5_PBKDF2);
+				strcpy(paramsS2->pszHMACAlgorithm, PKCS12_PBKDF2_ID_HMAC_SHA256);
+				strcpy(paramsS2->pszKeyAlgorithm, szOID_NIST_AES256_CBC);
+				BCryptGenRandom(0, paramsS2->pbSalt, cbSalt, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+				BCryptGenRandom(0, pbIV, cbIV, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+			}
+			else
+			{
+				params->iIterations = iIterations;
+				params->cbSalt = cbSalt;
+				BCryptGenRandom(0, pbParameters + sizeof(CRYPT_PKCS12_PBE_PARAMS), cbSalt, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+			}
+
+			PBYTE pbSecret = (PBYTE)pszPassword;
+			ULONG cbSecret = (ULONG)wcslen(pszPassword);
+
+			if (bUTF8)
+			{
+				PSTR psz = 0;
+				ULONG cch = 0;
+
+				while(cch = WideCharToMultiByte(CP_UTF8, 0, pszPassword, cbSecret, psz, cch, 0, 0))
+				{
+					if (psz)
+					{
+						pbSecret = (PBYTE)psz;
+						cbSecret = cch;
+						break;
+					}
+
+					psz = (PSTR)alloca(cch);
+				}
+			}
+			else
+			{
+				++cbSecret *= sizeof(WCHAR);
+			}
+
+			if (0 <= (status = map->ParamsEncode(pbParameters, cbParameters, &cdp, 
+				&epki.EncryptionAlgorithm.Parameters.pbData, 
+				&epki.EncryptionAlgorithm.Parameters.cbData)))
+			{
+				ULONG cb;
+				BCRYPT_ALG_HANDLE hAlgorithm;
+
+				if (0 <= (status = map->InitEncrypt(&hAlgorithm, &cb, pbParameters, cbParameters)))
+				{
+					BCRYPT_KEY_HANDLE hKey;
+
+					status = map->InitEncryptKey(hAlgorithm, &hKey, 
+						(PBYTE)alloca(cb), cb, pbSecret, cbSecret, pbParameters, cbParameters);
+
+					BCryptCloseAlgorithmProvider(hAlgorithm, 0);
+
+					if (0 <= status)
+					{
+						while (0 <= (status = BCryptEncrypt(hKey, 
+							pbKeyInfo, cbKeyInfo, 0, pbIV, cbIV, 
+							epki.EncryptedPrivateKey.pbData,
+							epki.EncryptedPrivateKey.cbData,
+							&epki.EncryptedPrivateKey.cbData, BCRYPT_BLOCK_PADDING)))
+						{
+							if (epki.EncryptedPrivateKey.pbData)
+							{
+								bWin32 = TRUE;
+								HR(status, CryptEncodeObjectEx(
+									X509_ASN_ENCODING, PKCS_ENCRYPTED_PRIVATE_KEY_INFO, 
+									&epki, CRYPT_ENCODE_ALLOC_FLAG, 0, 
+									ppbEncoded, pcbEncoded));
+
+								break;
+							}
+
+							epki.EncryptedPrivateKey.pbData = (PBYTE)alloca(epki.EncryptedPrivateKey.cbData);
+						}
+
+						BCryptDestroyKey(hKey);
+					}
+				}
+
+				LocalFree(epki.EncryptionAlgorithm.Parameters.pbData);
+			}
+
+			CryptFreeOIDFunctionAddress(hFuncAddr, 0);
+
+			return status && !bWin32 ? HRESULT_FROM_NT(status) : STATUS_SUCCESS;
 		}
 	}
 
@@ -587,6 +744,83 @@ HRESULT PkcsImportKey(_Out_ BCRYPT_KEY_HANDLE* phKey,
 		hr = NKeyToBKey(phKey, hKey, pcrc);
 		NCryptFreeObject(hKey);
 	}
+
+	return hr;
+}
+
+HRESULT PkcsExportKey(_Out_ PBYTE *ppb,
+					  _Out_ DWORD *pcb,
+					  _In_ NCRYPT_KEY_HANDLE hKey,
+					  _In_ PCWSTR pszPassword,
+					  _In_ PCSTR pszObjId,
+					  _In_ ULONG iIterations,
+					  _In_ ULONG cbSalt)
+{
+
+	union {
+		PVOID pvParameters;
+		PBYTE pbParameters;
+		CRYPT_PKCS12_PBE_PARAMS* params;
+		CRYPT_PKCS12_PBES2_PARAMS* paramsS2;
+	};
+
+	PBYTE pbIV = 0;
+	ULONG cbIV = 0;
+
+	BOOL S2 = !strcmp(szOID_PKCS_5_PBES2, pszObjId);
+	ULONG cbParameters = S2 ? sizeof(CRYPT_PKCS12_PBES2_PARAMS) : sizeof(CRYPT_PKCS12_PBE_PARAMS) + cbSalt;
+	pvParameters = alloca(cbParameters);
+
+	if (S2)
+	{
+		paramsS2->bUTF8 = TRUE;
+		paramsS2->cbSalt = cbSalt;
+		paramsS2->cbIV = 0x10;
+		paramsS2->cIterations = iIterations;
+
+		pbIV = paramsS2->pbIV;
+		cbIV = paramsS2->cbIV;
+
+		strcpy(paramsS2->pszObjId, szOID_PKCS_5_PBKDF2);
+		strcpy(paramsS2->pszHMACAlgorithm, PKCS12_PBKDF2_ID_HMAC_SHA256);
+		strcpy(paramsS2->pszKeyAlgorithm, szOID_NIST_AES256_CBC);
+		BCryptGenRandom(0, paramsS2->pbSalt, cbSalt, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+		BCryptGenRandom(0, pbIV, cbIV, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	}
+	else
+	{
+		params->iIterations = iIterations;
+		params->cbSalt = cbSalt;
+		BCryptGenRandom(0, pbParameters + sizeof(CRYPT_PKCS12_PBE_PARAMS), cbSalt, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	}
+
+	BCryptBuffer buf[] = { 
+		{ (1 + (ULONG)wcslen(pszPassword)) * sizeof(WCHAR), NCRYPTBUFFER_PKCS_SECRET, const_cast<PWSTR>(pszPassword) },
+		{ cbParameters, NCRYPTBUFFER_PKCS_ALG_PARAM, pbParameters },
+		{ 1 + (ULONG)strlen(pszObjId), NCRYPTBUFFER_PKCS_ALG_OID, const_cast<PSTR>(pszObjId) },
+	};
+
+	NCryptBufferDesc ParameterList { NCRYPTBUFFER_VERSION, _countof(buf), buf };
+
+	PBYTE pb = 0;
+	ULONG cb = 0;
+	HRESULT hr;
+	while (NOERROR == (hr = NCryptExportKey(hKey, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, &ParameterList, pb, cb, &cb, 0)))
+	{
+		if (pb)
+		{
+			*ppb = pb;
+			*pcb = cb;
+			return S_OK;
+		}
+
+		if (!(pb = (PBYTE)LocalAlloc(LMEM_FIXED, cb)))
+		{
+			return NTE_NO_MEMORY;
+		}
+	}
+
+	LocalFree(pb);
 
 	return hr;
 }
