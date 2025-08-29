@@ -332,31 +332,18 @@ struct CRYPT_PKCS12_PBES2_PARAMS
 	/*b4*/
 };
 
-HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ PCWSTR pszPassword)
+BOOL
+WINAPI
+PFXDecrypt(_In_ PCSTR pszObjId, 
+		   _In_ PBYTE pbParams, 
+		   _In_ ULONG cbParams, 
+		   _In_ PBYTE pbEncryptedKey, 
+		   _In_ ULONG cbEncryptedKey, 
+		   _Out_ BYTE* pbClearTextKey,
+		   _Out_ DWORD* pcbClearTextKey, 
+		   _In_ const void* pbSecret, 
+		   _In_ ULONG cbSecret)
 {
-	if (!__imp_I_PFXDecrypt)
-	{
-		if (HMODULE hmod = LoadLibraryW(L"crypt32"))
-		{
-			if (PVOID pv = GetProcAddress(hmod, "I_PFXDecrypt"))
-			{
-				__imp_I_PFXDecrypt = pv;
-			}
-		}
-	}
-
-	if (__imp_I_PFXDecrypt)
-	{
-		return BOOL_TO_ERROR(I_PFXDecrypt(pepki->EncryptionAlgorithm.pszObjId, 
-			pepki->EncryptionAlgorithm.Parameters.pbData, 
-			pepki->EncryptionAlgorithm.Parameters.cbData, 
-			pepki->EncryptedPrivateKey.pbData, 
-			pepki->EncryptedPrivateKey.cbData, 
-			pepki->EncryptedPrivateKey.pbData,
-			&pepki->EncryptedPrivateKey.cbData, 
-			pszPassword, (1 + (ULONG)wcslen(pszPassword))* sizeof(WCHAR)));
-	}
-
 	HCRYPTOIDFUNCADDR hFuncAddr;
 
 	if (HCRYPTOIDFUNCSET hFuncSet = CryptInitOIDFunctionSet("CryptCNGPKCS12GetMap", 0))
@@ -367,7 +354,7 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 		};
 
 		if (CryptGetOIDFunctionAddress(hFuncSet, X509_ASN_ENCODING, 
-			pepki->EncryptionAlgorithm.pszObjId, CRYPT_GET_INSTALLED_OID_FUNC_FLAG, &pvFuncAddr, &hFuncAddr))
+			pszObjId, CRYPT_GET_INSTALLED_OID_FUNC_FLAG, &pvFuncAddr, &hFuncAddr))
 		{
 			CryptCNGMap* map = GetPKCS12Map();
 
@@ -375,40 +362,30 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 
 			NTSTATUS status;
 
-			ULONG cbParameters;
-
 			union {
 				PBYTE pbParameters;
 				CRYPT_PKCS12_PBE_PARAMS* params;
 				CRYPT_PKCS12_PBES2_PARAMS* paramsS2;
 			};
 
-			if (0 <= (status = map->ParamsDecode(
-				pepki->EncryptionAlgorithm.Parameters.pbData,
-				pepki->EncryptionAlgorithm.Parameters.cbData, 
-				&cdp, &pbParameters, &cbParameters)))
+			if (0 <= (status = map->ParamsDecode(pbParams, cbParams, &cdp, &pbParameters, &cbParams)))
 			{
 				ULONG cb;
 				BCRYPT_ALG_HANDLE hAlgorithm;
 
-				if (0 <= (status = map->InitDecrypt(&hAlgorithm, &cb, 
-					pbParameters,
-					cbParameters)))
+				if (0 <= (status = map->InitDecrypt(&hAlgorithm, &cb, pbParameters, cbParams)))
 				{
 					BCRYPT_KEY_HANDLE hKey;
-
-					PBYTE pbSecret = (PBYTE)pszPassword;
-					ULONG cbSecret = (ULONG)wcslen(pszPassword);
 
 					PBYTE pbIV = 0;
 					ULONG cbIV = 0;
 					BOOL bUTF8 = FALSE;
 
-					if (!strcmp(szOID_PKCS_5_PBES2, pepki->EncryptionAlgorithm.pszObjId))
+					if (!strcmp(szOID_PKCS_5_PBES2, pszObjId))
 					{
 						status = STATUS_BAD_DATA;
 
-						if (sizeof(CRYPT_PKCS12_PBES2_PARAMS) != cbParameters ||
+						if (sizeof(CRYPT_PKCS12_PBES2_PARAMS) != cbParams ||
 							sizeof(paramsS2->pbIV) < (cbIV = paramsS2->cbIV))
 						{
 							goto __0;
@@ -421,12 +398,12 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 							PSTR psz = 0;
 							ULONG cch = 0;
 
-							while(cch = WideCharToMultiByte(CP_UTF8, 0, pszPassword, cbSecret, psz, cch, 0, 0))
+							while(0 <= RtlUnicodeToUTF8N(psz, cch, &cch, (PWSTR)pbSecret, cbSecret))
 							{
 								if (psz)
 								{
 									pbSecret = (PBYTE)psz;
-									cbSecret = cch;
+									cbSecret = cch - 1;
 									break;
 								}
 
@@ -435,25 +412,20 @@ HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ 
 						}
 					}
 
-					if (!bUTF8)
-					{
-						++cbSecret *= sizeof(WCHAR);
-					}
-
 					status = map->InitDecryptKey(hAlgorithm, &hKey, 
-						(PBYTE)alloca(cb), cb, pbSecret, cbSecret, pbParameters, cbParameters);
+						(PBYTE)alloca(cb), cb, (PBYTE)pbSecret, cbSecret, pbParameters, cbParams);
 
 					BCryptCloseAlgorithmProvider(hAlgorithm, 0);
 
 					if (0 <= status)
 					{
 						status = BCryptDecrypt(hKey, 
-							pepki->EncryptedPrivateKey.pbData,
-							pepki->EncryptedPrivateKey.cbData, 
+							pbEncryptedKey,
+							cbEncryptedKey, 
 							0, pbIV, cbIV, 
-							pepki->EncryptedPrivateKey.pbData,
-							pepki->EncryptedPrivateKey.cbData,
-							&pepki->EncryptedPrivateKey.cbData, BCRYPT_BLOCK_PADDING);
+							pbClearTextKey,
+							*pcbClearTextKey,
+							pcbClearTextKey, BCRYPT_BLOCK_PADDING);
 
 						BCryptDestroyKey(hKey);
 					}
@@ -469,6 +441,35 @@ __0:
 	}
 
 	return GetLastErrorEx();
+}
+
+HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ PCWSTR pszPassword)
+{
+	if (!__imp_I_PFXDecrypt)
+	{
+		if (HMODULE hmod = LoadLibraryW(L"crypt32"))
+		{
+			if (PVOID pv = GetProcAddress(hmod, "I_PFXDecrypt"))
+			{
+				__imp_I_PFXDecrypt = pv;
+			}
+		}
+
+		if (!__imp_I_PFXDecrypt)
+		{
+			__imp_I_PFXDecrypt = PFXDecrypt;
+		}
+	}
+
+	return BOOL_TO_ERROR(I_PFXDecrypt(pepki->EncryptionAlgorithm.pszObjId, 
+		pepki->EncryptionAlgorithm.Parameters.pbData, 
+		pepki->EncryptionAlgorithm.Parameters.cbData, 
+		pepki->EncryptedPrivateKey.pbData, 
+		pepki->EncryptedPrivateKey.cbData, 
+		pepki->EncryptedPrivateKey.pbData,
+		&pepki->EncryptedPrivateKey.cbData, 
+		(PBYTE)pszPassword, 
+		pszPassword ? (1 + (ULONG)wcslen(pszPassword)) * sizeof(WCHAR) : 0));
 }
 
 HRESULT EncryptPrivateKey(_Out_ PBYTE *ppbEncoded,
