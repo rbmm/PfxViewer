@@ -311,7 +311,7 @@ I_PFXDecrypt(_In_ PCSTR pszObjId,
 			 _In_ PBYTE pbEncryptedKey, 
 			 _In_ ULONG cbEncryptedKey, 
 			 _Out_ BYTE* pbClearTextKey,
-			 _Out_ DWORD* pcbClearTextKey, 
+			 _Inout_ DWORD* pcbClearTextKey, 
 			 _In_ const void* pbSecret, 
 			 _In_ ULONG cbSecret);
 
@@ -340,7 +340,7 @@ PFXDecrypt(_In_ PCSTR pszObjId,
 		   _In_ PBYTE pbEncryptedKey, 
 		   _In_ ULONG cbEncryptedKey, 
 		   _Out_ BYTE* pbClearTextKey,
-		   _Out_ DWORD* pcbClearTextKey, 
+		   _Inout_ DWORD* pcbClearTextKey, 
 		   _In_ const void* pbSecret, 
 		   _In_ ULONG cbSecret)
 {
