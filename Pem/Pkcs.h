@@ -53,8 +53,3 @@ HRESULT EncryptPrivateKey(_Out_ PBYTE *ppbEncoded,
 						  _In_ ULONG cbSalt);
 
 HRESULT DecryptPrivateKey(_Inout_ PCRYPT_ENCRYPTED_PRIVATE_KEY_INFO pepki, _In_ PCWSTR pszPassword);
-
-
-
-
-

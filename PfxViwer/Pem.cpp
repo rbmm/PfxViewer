@@ -4,7 +4,13 @@ PSTR __fastcall strnstr(SIZE_T n1, const void* str1, SIZE_T n2, const void* str2
 
 #define _strnstr(a, b, x) strnstr(RtlPointerToOffset(a, b), a, sizeof(x) - 1, x)
 
-HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _In_ ULONG cb, _In_opt_ PCWSTR pszPassword = 0)
+HRESULT PkcsImportKey(
+	_Out_ NCRYPT_KEY_HANDLE* phKey, 
+	_In_ PCWSTR pszBlobType,
+	_In_reads_(cb) BYTE* pb, 
+	_In_ ULONG cb, 
+	_In_opt_ PCWSTR pszPassword = 0
+	)
 {
 	NCRYPT_PROV_HANDLE hProvider;
 	SECURITY_STATUS status = NCryptOpenStorageProvider(&hProvider, MS_KEY_STORAGE_PROVIDER, 0);
@@ -26,8 +32,7 @@ HRESULT PkcsImportKey(_Out_ NCRYPT_KEY_HANDLE* phKey, _In_reads_(cb) BYTE* pb, _
 
 		NCRYPT_KEY_HANDLE hKey;
 
-		status = NCryptImportKey(hProvider, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, 
-			pParameterList, &hKey, pb, cb, NCRYPT_DO_NOT_FINALIZE_FLAG);
+		status = NCryptImportKey(hProvider, 0, pszBlobType, pParameterList, &hKey, pb, cb, NCRYPT_DO_NOT_FINALIZE_FLAG);
 
 		NCryptFreeObject(hProvider);
 
@@ -149,29 +154,14 @@ class __declspec(novtable) Pem
 public:
 	virtual ~Pem() = default;
 
-	HRESULT import(_In_reads_(cch) PCSTR psz, _In_ ULONG cch)
+	HRESULT import(_In_reads_(cch) PSTR psz, _In_ ULONG cch)
 	{
 		HRESULT hr;
 
-		PBYTE pb = 0;
-		ULONG cb = 0;
-
-		while (HR(hr, CryptStringToBinaryA(psz, cch, CRYPT_STRING_BASE64, pb, &cb, 0, 0)))
+		if (HR(hr, CryptStringToBinaryA(psz, cch, CRYPT_STRING_BASE64, (PBYTE)psz, &cch, 0, 0)))
 		{
-			if (pb)
-			{
-				hr = process(pb, cb);
-				break;
-			}
-
-			if (!(pb = new UCHAR[cb]))
-			{
-				hr = E_OUTOFMEMORY;
-				break;
-			}
+			hr = process((PBYTE)psz, cch);
 		}
-
-		if (pb) delete [] pb;
 
 		return hr;
 	}
@@ -227,11 +217,32 @@ public:
 	}
 };
 
+struct PemPublicKey : public PemKey
+{
+	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
+	{
+		HRESULT hr;
+		PCERT_PUBLIC_KEY_INFO PublicKeyInfo;
+
+		if (HR(hr, CryptDecodeObjectEx(X509_ASN_ENCODING,
+			X509_PUBLIC_KEY_INFO, pb, cb,
+			CRYPT_DECODE_ALLOC_FLAG | CRYPT_DECODE_NOCOPY_FLAG | CRYPT_DECODE_SHARE_OID_STRING_FLAG,
+			0, &PublicKeyInfo, &cb)))
+		{
+			HR(hr, CryptImportPublicKeyInfo(0, X509_ASN_ENCODING, PublicKeyInfo, &_M_hKey));
+
+			LocalFree(PublicKeyInfo);
+		}
+
+		return hr;
+	}
+};
+
 struct PemPrivateKey : public PemKey
 {
 	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
 	{
-		return PkcsImportKey(&_M_hKey, pb, cb);
+		return PkcsImportKey(&_M_hKey, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, pb, cb);
 	}
 };
 
@@ -245,43 +256,98 @@ struct PemEncryptedPrivateKey : public PemKey
 
 	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
 	{
-		return PkcsImportKey(&_M_hKey, pb, cb, _M_pszPassword);
+		return PkcsImportKey(&_M_hKey, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, pb, cb, _M_pszPassword);
 	}
 };
 
-PCSTR IsTag(_In_ PCSTR buf, _In_ PCSTR end, _In_ PCSTR TAG, _In_ ULONG cb)
+struct __declspec(novtable) PemRsaKey : public PemKey
 {
-	return (ULONG_PTR)(end - buf) < cb || memcmp(buf, TAG, cb) ? 0 : buf + cb;
+	virtual PCSTR GetStructType() = 0;
+
+	virtual PCWSTR GetBlobType() = 0;
+
+	virtual HRESULT process(_In_reads_(cb) BYTE* pb, _In_ ULONG cb)
+	{
+		HRESULT hr;
+		if (HR(hr, CryptDecodeObjectEx(X509_ASN_ENCODING, GetStructType(), pb, cb,
+			CRYPT_DECODE_ALLOC_FLAG | CRYPT_DECODE_NOCOPY_FLAG | CRYPT_DECODE_SHARE_OID_STRING_FLAG, 0, &pb, &cb)))
+		{
+			hr = PkcsImportKey(&_M_hKey, GetBlobType(), pb, cb);
+
+			LocalFree(pb);
+		}
+
+		return hr;
+	}
+};
+
+struct PemRsaPublicKey : public PemRsaKey
+{
+	virtual PCSTR GetStructType()
+	{
+		return CNG_RSA_PUBLIC_KEY_BLOB;
+	}
+
+	virtual PCWSTR GetBlobType()
+	{
+		return BCRYPT_RSAPUBLIC_BLOB;
+	}
+};
+
+struct PemRsaPrivateKey : public PemRsaKey
+{
+	virtual PCSTR GetStructType()
+	{
+		return CNG_RSA_PRIVATE_KEY_BLOB;
+	}
+
+	virtual PCWSTR GetBlobType()
+	{
+		return BCRYPT_RSAPRIVATE_BLOB;
+	}
+};
+
+PSTR IsTag(_In_ PCSTR buf, _In_ PCSTR end, _In_ PCSTR TAG, _In_ ULONG cb)
+{
+	return (ULONG_PTR)(end - buf) < cb || memcmp(buf, TAG, cb) ? 0 : const_cast<PSTR>(buf) + cb;
 }
 
-PCSTR IsBegin(_In_ PCSTR buf, _In_ PCSTR end)
+PSTR IsBegin(_In_ PCSTR buf, _In_ PCSTR end)
 {
 	const static char BEGIN[] = "BEGIN";
 	return IsTag(buf, end, BEGIN, sizeof(BEGIN) - 1);
 }
 
-PCSTR IsEnd(_In_ PCSTR buf, _In_ PCSTR end)
+PSTR IsEnd(_In_ PCSTR buf, _In_ PSTR end)
 {
 	const static char END[] = "END";
 	return IsTag(buf, end, END, sizeof(END) - 1);
 }
 
+PSTR IsRSA(_In_ PCSTR buf, _In_ PSTR end)
+{
+	const static char RSA[] = "RSA ";
+	return IsTag(buf, end, RSA, sizeof(RSA) - 1);
+}
+
 HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 				  _Out_ PCCERT_CONTEXT* ppCertContext,
-				  _In_ PCSTR buf, 
-				  _In_ PCSTR end,
+				  _In_ PSTR buf, 
+				  _In_ PSTR end,
 				  _In_ PCWSTR pszPassword)
 {
 	const static char _____[] = "-----";
 	const static char ENCRYPTED_PRIVATE_KEY[] = "ENCRYPTED PRIVATE KEY";
 	const static char CERTIFICATE[] = "CERTIFICATE";
+	const static char PUBLIC_KEY[] = "PUBLIC KEY";
 
-	enum { fInvalid ,fCert, fEncPrivKey, fPrivKey, fPubKey, fRsaPubKey, fRsaPrivKey } bt;
+	enum { fInvalid, fCert, fEncPrivKey, fPrivKey, fPubKey, fRsaPubKey, fRsaPrivKey } bt;
 
 	HRESULT hr;
 	PVOID stack = alloca(guz);
 	NCRYPT_KEY_HANDLE* keys = (NCRYPT_KEY_HANDLE*)stack;
 	ULONG nKeys = 0, nCerts = 0;
+	BOOLEAN bRSA;
 
 	if (HCERTSTORE hStore = HR(hr, CertOpenStore(sz_CERT_STORE_PROV_MEMORY, 0, 0, 0, 0)))
 	{
@@ -289,31 +355,61 @@ HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 		{
 			hr = HRESULT_FROM_NT(STATUS_INVALID_IMAGE_FORMAT);
 
-			bt = fInvalid;
+			bt = fInvalid, bRSA = FALSE;
 
 			if (!(buf = IsBegin(buf, end - sizeof(_____))) || *buf++ != ' ')
 			{
 				break;
 			}
 
+			UCHAR pembuf[sizeof(PemEncryptedPrivateKey)];
+			Pem* pem = 0;
+
 			PCSTR pcTag = buf;
 
 			if (buf = IsTag(pcTag, end, CERTIFICATE, sizeof(CERTIFICATE) - 1))
 			{
 				bt = fCert;
+				pem = new(pembuf, sizeof(pembuf)) PemCert(hStore);
 			}
-			else if (buf = IsTag(pcTag, end, 
-				ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"), 
+			else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"),
 				sizeof(ENCRYPTED_PRIVATE_KEY) - _countof("ENCRYPTED") - 1))
 			{
 				bt = fPrivKey;
+				pem = new(pembuf, sizeof(pembuf)) PemPrivateKey;
 			}
 			else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY, sizeof(ENCRYPTED_PRIVATE_KEY) - 1))
 			{
 				bt = fEncPrivKey;
+				pem = new(pembuf, sizeof(pembuf)) PemEncryptedPrivateKey(pszPassword);
+			}
+			else if (buf = IsTag(pcTag, end, PUBLIC_KEY, sizeof(PUBLIC_KEY) - 1))
+			{
+				bt = fPubKey;
+				pem = new(pembuf, sizeof(pembuf)) PemPublicKey;
+			}
+			else if (buf = IsRSA(pcTag, end))
+			{
+				bRSA = TRUE;
+				if (buf = IsTag(pcTag = buf, end, PUBLIC_KEY, sizeof(PUBLIC_KEY) - 1))
+				{
+					bt = fRsaPubKey;
+					pem = new(pembuf, sizeof(pembuf)) PemRsaPublicKey;
+				}
+				else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"),
+					sizeof(ENCRYPTED_PRIVATE_KEY) - _countof("ENCRYPTED") - 1))
+				{
+					bt = fRsaPrivKey;
+					pem = new(pembuf, sizeof(pembuf)) PemRsaPrivateKey;
+				}
+				else
+				{
+					goto __x;
+				}
 			}
 			else
 			{
+			__x:
 				if (!(buf = _strnstr(pcTag, end - 2, _____)))
 				{
 					break;
@@ -329,7 +425,7 @@ HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 __0:
 			ULONG len = RtlPointerToOffset(pcTag, buf);
 
-			PCSTR pc = buf;
+			PSTR pc = buf;
 
 			if (!(buf = _strnstr(buf, end, _____)))
 			{
@@ -338,28 +434,10 @@ __0:
 
 			ULONG cb = RtlPointerToOffset(pc, buf - sizeof(_____));
 
-			if (!(buf = IsEnd(buf, end - sizeof(_____))) || 
-				*buf++ != ' ' ||
+			if (!(buf = IsEnd(buf, end - sizeof(_____))) || *buf++ != ' ' ||
+				(bRSA && !(buf = IsRSA(buf, end))) ||
 				!(buf = IsTag(buf, end, pcTag, len)))
 			{
-				break;
-			}
-
-			UCHAR pembuf[sizeof(PemEncryptedPrivateKey)];
-			Pem* pem = 0;
-
-			switch (bt)
-			{
-			case fCert:
-				pem = new(pembuf, sizeof(pembuf)) PemCert(hStore);
-				break;
-
-			case fPrivKey:
-				pem = new(pembuf, sizeof(pembuf)) PemPrivateKey;
-				break;
-
-			case fEncPrivKey:
-				pem = new(pembuf, sizeof(pembuf)) PemEncryptedPrivateKey(pszPassword);
 				break;
 			}
 
@@ -367,12 +445,14 @@ __0:
 			{
 				if (S_OK == (hr = pem->import(pc, cb)))
 				{
-					if (fCert == bt)
+					switch (bt)
 					{
+					case fCert:
 						nCerts++;
-					}
-					else
-					{
+						break;
+					case fEncPrivKey:
+					case fPrivKey:
+					case fRsaPrivKey:
 						if (--keys < stack)
 						{
 							stack = alloca(sizeof(Pem*));
@@ -383,6 +463,7 @@ __0:
 						{
 							hr = STATUS_TOO_MANY_SECRETS;
 						}
+						break;
 					}
 				}
 

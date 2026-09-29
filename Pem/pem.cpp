@@ -15,25 +15,10 @@ public:
 	{
 		HRESULT hr;
 
-		PBYTE pb = 0;
-		ULONG cb = 0;
-
-		while (HR(hr, CryptStringToBinaryA(psz, cch, CRYPT_STRING_BASE64, pb, &cb, 0, 0)))
+		if (HR(hr, CryptStringToBinaryA(psz, cch, CRYPT_STRING_BASE64, (PBYTE)psz, &cch, 0, 0)))
 		{
-			if (pb)
-			{
-				hr = process(pb, cb);
-				break;
-			}
-
-			if (!(pb = new UCHAR[cb]))
-			{
-				hr = E_OUTOFMEMORY;
-				break;
-			}
+			hr = process((PBYTE)psz, cch);
 		}
-
-		if (pb) delete [] pb;
 
 		return hr;
 	}
@@ -273,21 +258,27 @@ PSTR __fastcall strnstr(SIZE_T n1, const void* str1, SIZE_T n2, const void* str2
 
 #define _strnstr(a, b, x) strnstr(RtlPointerToOffset(a, b), a, sizeof(x) - 1, x)
 
-PCSTR IsTag(_In_ PCSTR buf, _In_ PCSTR end, _In_ PCSTR TAG, _In_ ULONG cb)
+PSTR IsTag(_In_ PCSTR buf, _In_ PCSTR end, _In_ PCSTR TAG, _In_ ULONG cb)
 {
-	return (ULONG_PTR)(end - buf) < cb || memcmp(buf, TAG, cb) ? 0 : buf + cb;
+	return (ULONG_PTR)(end - buf) < cb || memcmp(buf, TAG, cb) ? 0 : const_cast<PSTR>(buf) + cb;
 }
 
-PCSTR IsBegin(_In_ PCSTR buf, _In_ PCSTR end)
+PSTR IsBegin(_In_ PCSTR buf, _In_ PCSTR end)
 {
 	const static char BEGIN[] = "BEGIN";
 	return IsTag(buf, end, BEGIN, sizeof(BEGIN) - 1);
 }
 
-PCSTR IsEnd(_In_ PCSTR buf, _In_ PCSTR end)
+PSTR IsEnd(_In_ PCSTR buf, _In_ PSTR end)
 {
 	const static char END[] = "END";
 	return IsTag(buf, end, END, sizeof(END) - 1);
+}
+
+PSTR IsRSA(_In_ PCSTR buf, _In_ PSTR end)
+{
+	const static char RSA[] = "RSA ";
+	return IsTag(buf, end, RSA, sizeof(RSA) - 1);
 }
 
 void FreeKeysI(_In_ BCRYPT_KEY_HANDLE* phKeys, _In_ ULONG nKeys)
@@ -310,15 +301,16 @@ void FreeKeys(_In_ BCRYPT_KEY_HANDLE* phKeys, _In_ ULONG nKeys)
 HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 				  _Out_ BCRYPT_KEY_HANDLE** pphKeys,
 				  _Out_ ULONG* pnKeys,
-				  _In_ PCSTR buf, 
-				  _In_ PCSTR end,
+				  _In_ PSTR buf, 
+				  _In_ PSTR end,
 				  _In_ PCWSTR pszPassword)
 {
 	const static char _____[] = "-----";
 	const static char ENCRYPTED_PRIVATE_KEY[] = "ENCRYPTED PRIVATE KEY";
 	const static char CERTIFICATE[] = "CERTIFICATE";
+	const static char PUBLIC_KEY[] = "PUBLIC KEY";
 
-	enum { fInvalid ,fCert, fEncPrivKey, fPrivKey, fPubKey, fRsaPubKey, fRsaPrivKey } bt;
+	enum { fInvalid, fCert, fEncPrivKey, fPrivKey, fPubKey, fRsaPubKey, fRsaPrivKey } bt;
 
 	*pphKeys = 0;
 	*phStore = 0;
@@ -328,6 +320,7 @@ HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 	PVOID stack = alloca(guz);
 	BCRYPT_KEY_HANDLE* keys = (BCRYPT_KEY_HANDLE*)stack;
 	ULONG nKeys = 0, nCerts = 0;
+	BOOLEAN bRSA;
 
 	if (HCERTSTORE hStore = HR(hr, CertOpenStore(sz_CERT_STORE_PROV_MEMORY, 0, 0, 0, 0)))
 	{
@@ -335,31 +328,61 @@ HRESULT PEMImport(_Out_ HCERTSTORE* phStore,
 		{
 			hr = HRESULT_FROM_NT(STATUS_INVALID_IMAGE_FORMAT);
 
-			bt = fInvalid;
+			bt = fInvalid, bRSA = FALSE;
 
 			if (!(buf = IsBegin(buf, end - sizeof(_____))) || *buf++ != ' ')
 			{
 				break;
 			}
 
-			PCSTR pcTag = buf;
+			UCHAR pembuf[sizeof(PemEncryptedPrivateKey)];
+			Pem* pem = 0;
+
+			PSTR pcTag = buf;
 
 			if (buf = IsTag(pcTag, end, CERTIFICATE, sizeof(CERTIFICATE) - 1))
 			{
 				bt = fCert;
+				pem = new(pembuf, sizeof(pembuf)) PemCert(hStore);
 			}
-			else if (buf = IsTag(pcTag, end, 
-				ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"), 
+			else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"),
 				sizeof(ENCRYPTED_PRIVATE_KEY) - _countof("ENCRYPTED") - 1))
 			{
 				bt = fPrivKey;
+				pem = new(pembuf, sizeof(pembuf)) PemPrivateKey;
 			}
 			else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY, sizeof(ENCRYPTED_PRIVATE_KEY) - 1))
 			{
 				bt = fEncPrivKey;
+				pem = new(pembuf, sizeof(pembuf)) PemEncryptedPrivateKey(pszPassword);
+			}
+			else if (buf = IsTag(pcTag, end, PUBLIC_KEY, sizeof(PUBLIC_KEY) - 1))
+			{
+				bt = fPubKey;
+				pem = new(pembuf, sizeof(pembuf)) PemPublicKey;
+			}
+			else if (buf = IsRSA(pcTag, end))
+			{
+				bRSA = TRUE;
+				if (buf = IsTag(pcTag = buf, end, PUBLIC_KEY, sizeof(PUBLIC_KEY) - 1))
+				{
+					bt = fRsaPubKey;
+					pem = new(pembuf, sizeof(pembuf)) PemRsaPublicKey;
+				}
+				else if (buf = IsTag(pcTag, end, ENCRYPTED_PRIVATE_KEY + _countof("ENCRYPTED"),
+					sizeof(ENCRYPTED_PRIVATE_KEY) - _countof("ENCRYPTED") - 1))
+				{
+					bt = fRsaPrivKey;
+					pem = new(pembuf, sizeof(pembuf)) PemRsaPrivateKey;
+				}
+				else
+				{
+					goto __x;
+				}
 			}
 			else
 			{
+			__x:
 				if (!(buf = _strnstr(pcTag, end - 2, _____)))
 				{
 					break;
@@ -384,28 +407,10 @@ __0:
 
 			ULONG cb = RtlPointerToOffset(pc, buf - sizeof(_____));
 
-			if (!(buf = IsEnd(buf, end - sizeof(_____))) || 
-				*buf++ != ' ' ||
+			if (!(buf = IsEnd(buf, end - sizeof(_____))) || *buf++ != ' ' ||
+				(bRSA && !(buf = IsRSA(buf, end))) ||
 				!(buf = IsTag(buf, end, pcTag, len)))
 			{
-				break;
-			}
-
-			UCHAR pembuf[sizeof(PemEncryptedPrivateKey)];
-			Pem* pem = 0;
-
-			switch (bt)
-			{
-			case fCert:
-				pem = new(pembuf, sizeof(pembuf)) PemCert(hStore);
-				break;
-
-			case fPrivKey:
-				pem = new(pembuf, sizeof(pembuf)) PemPrivateKey;
-				break;
-
-			case fEncPrivKey:
-				pem = new(pembuf, sizeof(pembuf)) PemEncryptedPrivateKey(pszPassword);
 				break;
 			}
 
